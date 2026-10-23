@@ -1,0 +1,524 @@
+"""Interfaz gráfica de Word-Architect.
+
+Permite crear documentos de Word mediante una ventana gráfica adaptable
+utilizando Tkinter, con botones de formato, tooltips y listas automáticas.
+"""
+
+import re
+import tkinter as tk
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
+from typing import List, Optional
+
+
+# ==========================================
+# IMPORTACIONES DEL PROYECTO
+# ==========================================
+
+if __package__:
+    from .documento import (
+        OUTPUT_DIR,
+        PROJECT_ROOT,
+        crear_documento as _crear_documento,
+    )
+else:
+    # Permite ejecutar directamente: python src/gui.py
+    from documento import (  # type: ignore[no-redef]
+        OUTPUT_DIR,
+        PROJECT_ROOT,
+        crear_documento as _crear_documento,
+    )
+
+
+__all__ = [
+    "crear_documento",
+    "main",
+    "PROJECT_ROOT",
+    "OUTPUT_DIR",
+]
+
+
+# ==========================================
+# DESCRIPCIONES EMERGENTES (TOOLTIPS)
+# ==========================================
+
+class ToolTip:
+    """Mostrar una descripción breve al dejar el puntero sobre un widget."""
+
+    def __init__(self, widget, texto: str, retraso: int = 450) -> None:
+        self.widget = widget
+        self.texto = texto
+        self.retraso = retraso
+        self._temporizador = None
+        self._ventana = None
+
+        widget.bind("<Enter>", self._programar, add="+")
+        widget.bind("<Leave>", self._ocultar, add="+")
+        widget.bind("<ButtonPress>", self._ocultar, add="+")
+
+    def _programar(self, event=None) -> None:
+        self._cancelar_temporizador()
+        self._temporizador = self.widget.after(
+            self.retraso,
+            self._mostrar,
+        )
+
+    def _cancelar_temporizador(self) -> None:
+        if self._temporizador is not None:
+            try:
+                self.widget.after_cancel(self._temporizador)
+            except tk.TclError:
+                pass
+            self._temporizador = None
+
+    def _mostrar(self) -> None:
+        self._temporizador = None
+
+        if self._ventana is not None or not self.texto:
+            return
+
+        try:
+            if not self.widget.winfo_exists():
+                return
+
+            x = self.widget.winfo_rootx() + 8
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 5
+
+            popup = tk.Toplevel(self.widget)
+            self._ventana = popup
+            popup.wm_overrideredirect(True)
+
+            try:
+                popup.attributes("-topmost", True)
+            except tk.TclError:
+                pass
+
+            etiqueta = ttk.Label(
+                popup,
+                text=self.texto,
+                padding=(9, 6),
+                relief="solid",
+                wraplength=320,
+            )
+            etiqueta.pack()
+            popup.update_idletasks()
+
+            # Mantener el tooltip dentro de los límites de la pantalla.
+            ancho_pantalla = self.widget.winfo_screenwidth()
+            alto_pantalla = self.widget.winfo_screenheight()
+            ancho_popup = popup.winfo_reqwidth()
+            alto_popup = popup.winfo_reqheight()
+
+            if x + ancho_popup > ancho_pantalla:
+                x = max(0, ancho_pantalla - ancho_popup - 8)
+
+            if y + alto_popup > alto_pantalla:
+                y = max(0, self.widget.winfo_rooty() - alto_popup - 5)
+
+            popup.wm_geometry(f"+{x}+{y}")
+
+        except tk.TclError:
+            self._ventana = None
+
+    def _ocultar(self, event=None) -> None:
+        self._cancelar_temporizador()
+
+        if self._ventana is not None:
+            try:
+                self._ventana.destroy()
+            except tk.TclError:
+                pass
+            self._ventana = None
+
+
+# ==========================================
+# GENERADOR DE DOCUMENTOS
+# ==========================================
+
+def crear_documento(
+    titulo: str,
+    parrafos: List[str],
+    ruta_destino: Optional[Path] = None,
+) -> Path:
+    """Crear un documento Word utilizando el módulo documento.py."""
+
+    return _crear_documento(
+        titulo,
+        parrafos,
+        ruta_destino,
+        procesar_marcas=True,
+    )
+
+
+# ==========================================
+# FUNCIONES DEL EDITOR
+# ==========================================
+
+def aplicar_marcador(marcador: str) -> None:
+    """Aplicar formato a las líneas seleccionadas o a la línea actual."""
+
+    try:
+        inicio = cuadro_contenido.index("sel.first linestart")
+        fin = cuadro_contenido.index("sel.last lineend")
+    except tk.TclError:
+        inicio = cuadro_contenido.index("insert linestart")
+        fin = cuadro_contenido.index("insert lineend")
+
+    contenido = cuadro_contenido.get(inicio, fin)
+    resultado = []
+
+    for linea in contenido.split("\n"):
+        # Eliminar una marca anterior antes de aplicar la nueva.
+        texto = re.sub(
+            r"^(#{1,3}\s+|[-*]\s+|\d+[.)]\s+)",
+            "",
+            linea.strip(),
+        )
+
+        resultado.append(marcador + texto if texto else marcador)
+
+    cuadro_contenido.delete(inicio, fin)
+    cuadro_contenido.insert(inicio, "\n".join(resultado))
+    cuadro_contenido.focus_set()
+
+
+def aplicar_marcador_atajo(event, marcador: str) -> str:
+    """Aplicar un formato mediante atajo y consumir el evento de teclado."""
+
+    aplicar_marcador(marcador)
+    return "break"
+
+
+def manejar_enter_editor(event=None):
+    """Continuar listas numeradas y viñetas al pulsar Enter."""
+
+    widget = cuadro_contenido
+
+    # Si existe una selección, dejar que Tkinter gestione el salto de línea.
+    try:
+        widget.index("sel.first")
+        return None
+    except tk.TclError:
+        pass
+
+    # Si el cursor no está al final de la línea, insertar un salto normal.
+    if widget.compare("insert", "!=", "insert lineend"):
+        return None
+
+    linea = widget.get("insert linestart", "insert")
+
+    numeracion = re.match(r"^([ \t]*)(\d+)([.)])\s+(.*)$", linea)
+    if numeracion:
+        sangria, numero, separador, texto = numeracion.groups()
+
+        # Un elemento vacío termina la lista.
+        if not texto.strip():
+            widget.delete("insert linestart", "insert")
+            widget.insert("insert", "\n")
+            return "break"
+
+        siguiente = int(numero) + 1
+        widget.insert("insert", f"\n{sangria}{siguiente}{separador} ")
+        return "break"
+
+    viñeta = re.match(r"^([ \t]*)([-*])\s+(.*)$", linea)
+    if viñeta:
+        sangria, simbolo, texto = viñeta.groups()
+
+        if not texto.strip():
+            widget.delete("insert linestart", "insert")
+            widget.insert("insert", "\n")
+            return "break"
+
+        widget.insert("insert", f"\n{sangria}{simbolo} ")
+        return "break"
+
+    # Permitir el comportamiento normal de Enter para el resto del texto.
+    return None
+
+
+def limpiar_campos() -> None:
+    """Limpiar el formulario después de confirmar si hay contenido."""
+
+    tiene_contenido = bool(
+        entrada_titulo.get().strip()
+        or cuadro_contenido.get("1.0", "end-1c").strip()
+    )
+
+    if tiene_contenido:
+        confirmar = messagebox.askyesno(
+            "Confirmar limpieza",
+            "¿Deseas borrar el título y todo el contenido escrito?",
+            parent=ventana,
+        )
+        if not confirmar:
+            return
+
+    entrada_titulo.delete(0, tk.END)
+    cuadro_contenido.delete("1.0", tk.END)
+    etiqueta_estado.config(text="Listo para crear un documento.")
+    entrada_titulo.focus_set()
+
+
+def generar_documento() -> None:
+    """Validar el contenido y guardar un archivo Word editable."""
+
+    titulo = entrada_titulo.get().strip()
+    contenido = cuadro_contenido.get("1.0", "end-1c").strip()
+
+    if not titulo:
+        messagebox.showwarning(
+            "Datos obligatorios",
+            "Escribe el título del documento.",
+            parent=ventana,
+        )
+        entrada_titulo.focus_set()
+        return
+
+    if not contenido:
+        messagebox.showwarning(
+            "Datos obligatorios",
+            "Escribe el contenido del documento.",
+            parent=ventana,
+        )
+        cuadro_contenido.focus_set()
+        return
+
+    parrafos = [linea.strip() for linea in contenido.splitlines() if linea.strip()]
+
+    nombre = re.sub(r"[^\w\s-]", "", titulo.lower())
+    nombre = re.sub(r"[\s-]+", "_", nombre).strip("_") or "documento"
+
+    try:
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+        ruta_seleccionada = filedialog.asksaveasfilename(
+            parent=ventana,
+            title="Guardar documento de Word",
+            initialdir=str(OUTPUT_DIR),
+            initialfile=f"{nombre}.docx",
+            defaultextension=".docx",
+            filetypes=[("Documentos de Word", "*.docx")],
+        )
+
+        if not ruta_seleccionada:
+            etiqueta_estado.config(text="Guardado cancelado.")
+            return
+
+        ruta = crear_documento(
+            titulo,
+            parrafos,
+            Path(ruta_seleccionada),
+        )
+
+        etiqueta_estado.config(text=f"Documento guardado: {ruta.name}")
+        messagebox.showinfo(
+            "Word-Architect",
+            "¡Documento creado correctamente!\n\n"
+            f"Nombre: {ruta.name}\n\n"
+            f"Ubicación:\n{ruta}",
+            parent=ventana,
+        )
+
+    except Exception as error:
+        messagebox.showerror(
+            "Error al crear el documento",
+            f"No se pudo generar el documento.\n\n{error}",
+            parent=ventana,
+        )
+
+
+# ==========================================
+# CREAR LA INTERFAZ GRÁFICA
+# ==========================================
+
+def main() -> None:
+    """Iniciar la interfaz gráfica adaptable de Word-Architect."""
+
+    global ventana
+    global entrada_titulo
+    global cuadro_contenido
+    global etiqueta_estado
+
+    ventana = tk.Tk()
+    ventana.title("Word-Architect | Generador de documentos")
+    ventana.geometry("760x600")
+    ventana.minsize(580, 460)
+
+    ventana.columnconfigure(0, weight=1)
+    ventana.rowconfigure(0, weight=1)
+
+    marco = ttk.Frame(ventana, padding=12)
+    marco.grid(row=0, column=0, sticky="nsew")
+    marco.columnconfigure(0, weight=1)
+    marco.rowconfigure(6, weight=1, minsize=120)
+
+    # Encabezado
+    ttk.Label(
+        marco,
+        text="WORD-ARCHITECT",
+        font=("Arial", 20, "bold"),
+    ).grid(row=0, column=0, sticky="w", pady=(0, 3))
+
+    ttk.Label(
+        marco,
+        text="Generador de documentos Microsoft Word",
+    ).grid(row=1, column=0, sticky="w", pady=(0, 12))
+
+    # Título del documento
+    ttk.Label(marco, text="Título del documento:").grid(
+        row=2, column=0, sticky="w", pady=(0, 4)
+    )
+
+    entrada_titulo = ttk.Entry(marco, font=("Arial", 11))
+    entrada_titulo.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+
+    # Editor de contenido
+    ttk.Label(marco, text="Contenido del documento:").grid(
+        row=4, column=0, sticky="w"
+    )
+
+    herramientas = ttk.Frame(marco)
+    herramientas.grid(row=5, column=0, sticky="ew", pady=6)
+
+    opciones_formato = [
+        ("H1  Título", "# ", "Aplicar un título principal de nivel 1."),
+        ("H2  Subtítulo", "## ", "Aplicar un subtítulo de nivel 2."),
+        ("H3  Sección", "### ", "Aplicar un encabezado de nivel 3."),
+        ("•  Viñeta", "- ", "Crear una lista con viñetas; Enter continúa la lista."),
+        ("1.  Numeración", "1. ", "Crear una lista numerada; Enter incrementa el número."),
+    ]
+
+    botones_formato = []
+    tooltips = []  # Mantener referencias a las descripciones emergentes.
+
+    for texto, marcador, descripcion in opciones_formato:
+        boton = ttk.Button(
+            herramientas,
+            text=texto,
+            command=lambda valor=marcador: aplicar_marcador(valor),
+        )
+        botones_formato.append(boton)
+        tooltips.append(ToolTip(boton, descripcion))
+
+    distribucion_actual = {"columnas": 0}
+
+    def ajustar_herramientas(event=None) -> None:
+        """Distribuir los botones en una o dos filas según el ancho."""
+
+        ancho = herramientas.winfo_width()
+        columnas = 2 if ancho < 620 else len(opciones_formato)
+
+        if distribucion_actual["columnas"] == columnas:
+            return
+
+        for boton in botones_formato:
+            boton.grid_forget()
+
+        for columna in range(len(opciones_formato)):
+            herramientas.columnconfigure(columna, weight=0)
+
+        for columna in range(columnas):
+            herramientas.columnconfigure(columna, weight=1)
+
+        for indice, boton in enumerate(botones_formato):
+            fila = indice // columnas
+            columna = indice % columnas
+            boton.grid(
+                row=fila,
+                column=columna,
+                sticky="ew",
+                padx=3,
+                pady=2,
+            )
+
+        distribucion_actual["columnas"] = columnas
+
+    herramientas.bind("<Configure>", ajustar_herramientas)
+
+    # Área editable con barra de desplazamiento
+    editor = ttk.Frame(marco)
+    editor.grid(row=6, column=0, sticky="nsew", pady=(0, 10))
+    editor.columnconfigure(0, weight=1)
+    editor.rowconfigure(0, weight=1)
+
+    cuadro_contenido = tk.Text(
+        editor,
+        wrap="word",
+        font=("Arial", 11),
+        undo=True,
+        padx=8,
+        pady=8,
+    )
+    cuadro_contenido.grid(row=0, column=0, sticky="nsew")
+    cuadro_contenido.bind("<Return>", manejar_enter_editor)
+
+    # Atajos para el formato. Funcionan cuando el editor tiene el foco.
+    atajos = [
+        ("<Control-Key-1>", "# "),
+        ("<Control-Key-2>", "## "),
+        ("<Control-Key-3>", "### "),
+        ("<Control-Key-4>", "- "),
+        ("<Control-Key-5>", "1. "),
+    ]
+
+    for secuencia, marcador in atajos:
+        cuadro_contenido.bind(
+            secuencia,
+            lambda event, valor=marcador: aplicar_marcador_atajo(event, valor),
+        )
+
+    barra = ttk.Scrollbar(
+        editor,
+        orient="vertical",
+        command=cuadro_contenido.yview,
+    )
+    barra.grid(row=0, column=1, sticky="ns")
+    cuadro_contenido.configure(yscrollcommand=barra.set)
+
+    # Botones principales con símbolos y descripciones
+    acciones = ttk.Frame(marco)
+    acciones.grid(row=7, column=0, sticky="ew", pady=(0, 8))
+
+    boton_guardar = ttk.Button(
+        acciones,
+        text="▣  Guardar documento Word",
+        command=generar_documento,
+    )
+    boton_guardar.pack(side="left", padx=(0, 8))
+    tooltips.append(
+        ToolTip(
+            boton_guardar,
+            "Guardar el documento como .docx y elegir el nombre y la ubicación.",
+        )
+    )
+
+    boton_limpiar = ttk.Button(
+        acciones,
+        text="⌫  Limpiar campos",
+        command=limpiar_campos,
+    )
+    boton_limpiar.pack(side="left")
+    tooltips.append(
+        ToolTip(
+            boton_limpiar,
+            "Borrar el título y el contenido. Se solicitará confirmación.",
+        )
+    )
+
+    etiqueta_estado = ttk.Label(
+        marco,
+        text="Listo para crear un documento.",
+    )
+    etiqueta_estado.grid(row=8, column=0, sticky="ew")
+
+    entrada_titulo.focus_set()
+    ventana.mainloop()
+
+
+# ==========================================
+# INICIO DE LA APLICACIÓN
+# ==========================================
+
+if __name__ == "__main__":
+    main()

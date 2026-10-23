@@ -515,6 +515,57 @@ def _base_sup_sub(tipo: str, base, extra):
     return elem
 
 
+def _operador_con_limites(tipo: str, inferior, superior, cuerpo) -> list:
+    """Construir <m:func> con nombre, límites (inf/sup) y argumento.
+
+    Estructura OMML válida para operadores como ∫, ∑, lim, ∏:
+
+        <m:func>
+          <m:funcName>∫</m:funcName>
+          <m:lim m:val="inf"><m:e>...</m:e></m:lim>
+          <m:lim m:val="sup"><m:e>...</m:e></m:lim>
+          <m:arg>...</m:arg>
+        </m:func>
+
+    Los límites van dentro de <m:func> (no como hijos sueltos de <m:oMath>)
+    y llevan el atributo m:val para que Word sepa cuál es inferior y cuál
+    superior. El integrando o cuerpo va dentro de <m:arg>, preservando el
+    orden y el contenido completo de la expresión.
+    """
+    simbolos = {
+        "integral": "∫",
+        "suma": "∑",
+        "limite": "lim",
+        "producto": "∏",
+    }
+    simbolo = simbolos[tipo]
+
+    func = etree.Element(_m("func"))
+    func_name = etree.SubElement(func, _m("funcName"))
+    func_name.append(_texto_run(simbolo))
+
+    if inferior is not None:
+        lim_inf = etree.SubElement(func, _m("lim"))
+        lim_inf.set("{" + M_NS + "}val", "inf")
+        e = etree.SubElement(lim_inf, _m("e"))
+        for el in _ast_a_omml_lista(inferior):
+            e.append(el)
+
+    if superior is not None:
+        lim_sup = etree.SubElement(func, _m("lim"))
+        lim_sup.set("{" + M_NS + "}val", "sup")
+        e = etree.SubElement(lim_sup, _m("e"))
+        for el in _ast_a_omml_lista(superior):
+            e.append(el)
+
+    if cuerpo is not None:
+        arg = etree.SubElement(func, _m("arg"))
+        for el in _ast_a_omml_lista(cuerpo):
+            arg.append(el)
+
+    return [func]
+
+
 def _ast_a_omml_lista(nodo) -> list:
     """Convertir un nodo AST a una lista de elementos OMML (sin envolver en oMath).
 
@@ -591,113 +642,13 @@ def _ast_a_omml_lista(nodo) -> list:
             e.append(_encierra_grupo(op_el))
         return [rad]
 
-    # Integral: oMath con func, límites e integrando como hijos directos
-    if tipo == "integral":
-        omath = etree.Element(_m("oMath"))
-        func = etree.Element(_m("func"))
-        func_name = etree.SubElement(func, _m("funcName"))
-        func_name.append(_texto_run("∫"))
-        omath.append(func)
-        inferior = nodo[1]
-        superior = nodo[2]
-        if inferior is not None:
-            lim = etree.Element(_m("lim"))
-            e = etree.SubElement(lim, _m("e"))
-            for el in _ast_a_omml_lista(inferior):
-                e.append(_encierra_grupo(el))
-            omath.append(lim)
-        if superior is not None:
-            lim = etree.Element(_m("lim"))
-            e = etree.SubElement(lim, _m("e"))
-            for el in _ast_a_omml_lista(superior):
-                e.append(_encierra_grupo(el))
-            omath.append(lim)
-        integrando = nodo[3] if len(nodo) > 3 else None
-        if integrando is not None:
-            for el in _ast_a_omml_lista(integrando):
-                omath.append(el)
-        return [omath]
-
-    # Sumatoria: oMath con func, límites e integrando como hijos directos
-    if tipo == "suma":
-        omath = etree.Element(_m("oMath"))
-        func = etree.Element(_m("func"))
-        func_name = etree.SubElement(func, _m("funcName"))
-        func_name.append(_texto_run("∑"))
-        omath.append(func)
-        inferior = nodo[1]
-        superior = nodo[2]
-        if inferior is not None:
-            lim = etree.Element(_m("lim"))
-            e = etree.SubElement(lim, _m("e"))
-            for el in _ast_a_omml_lista(inferior):
-                e.append(_encierra_grupo(el))
-            omath.append(lim)
-        if superior is not None:
-            lim = etree.Element(_m("lim"))
-            e = etree.SubElement(lim, _m("e"))
-            for el in _ast_a_omml_lista(superior):
-                e.append(_encierra_grupo(el))
-            omath.append(lim)
-        integrando = nodo[3] if len(nodo) > 3 else None
-        if integrando is not None:
-            for el in _ast_a_omml_lista(integrando):
-                omath.append(el)
-        return [omath]
-
-    # Límite: oMath con func, límites e cuerpo como hijos directos
-    if tipo == "limite":
-        omath = etree.Element(_m("oMath"))
-        func = etree.Element(_m("func"))
-        func_name = etree.SubElement(func, _m("funcName"))
-        func_name.append(_texto_run("lim"))
-        omath.append(func)
-        inferior = nodo[1]
-        superior = nodo[2]
-        if inferior is not None:
-            lim = etree.Element(_m("lim"))
-            e = etree.SubElement(lim, _m("e"))
-            for el in _ast_a_omml_lista(inferior):
-                e.append(_encierra_grupo(el))
-            omath.append(lim)
-        if superior is not None:
-            lim = etree.Element(_m("lim"))
-            e = etree.SubElement(lim, _m("e"))
-            for el in _ast_a_omml_lista(superior):
-                e.append(_encierra_grupo(el))
-            omath.append(lim)
+    # Operador con límites (∫, ∑, lim, ∏): funcName + límites + argumento.
+    # Estructura OMML válida: <m:func><m:funcName>...</m:funcName>
+    # <m:lim m:val="inf"><m:e>...</m:e></m:lim>
+    # <m:lim m:val="sup"><m:e>...</m:e></m:lim><m:arg>...</m:arg></m:func>
+    if tipo in ("integral", "suma", "limite", "producto"):
         cuerpo = nodo[3] if len(nodo) > 3 else None
-        if cuerpo is not None:
-            for el in _ast_a_omml_lista(cuerpo):
-                omath.append(el)
-        return [omath]
-
-    # Producto: oMath con func, límites e integrando como hijos directos
-    if tipo == "producto":
-        omath = etree.Element(_m("oMath"))
-        func = etree.Element(_m("func"))
-        func_name = etree.SubElement(func, _m("funcName"))
-        func_name.append(_texto_run("∏"))
-        omath.append(func)
-        inferior = nodo[1]
-        superior = nodo[2]
-        if inferior is not None:
-            lim = etree.Element(_m("lim"))
-            e = etree.SubElement(lim, _m("e"))
-            for el in _ast_a_omml_lista(inferior):
-                e.append(_encierra_grupo(el))
-            omath.append(lim)
-        if superior is not None:
-            lim = etree.Element(_m("lim"))
-            e = etree.SubElement(lim, _m("e"))
-            for el in _ast_a_omml_lista(superior):
-                e.append(_encierra_grupo(el))
-            omath.append(lim)
-        integrando = nodo[3] if len(nodo) > 3 else None
-        if integrando is not None:
-            for el in _ast_a_omml_lista(integrando):
-                omath.append(el)
-        return [omath]
+        return _operador_con_limites(tipo, nodo[1], nodo[2], cuerpo)
 
     # Función (sin, cos, etc.): oMath con func y argumento como hijos directos
     if tipo == "funcion":
@@ -740,9 +691,20 @@ def _ast_a_omml(nodo):
 
 
 def latex_a_omml(texto: str):
-    """Convertir una expresión LaTeX a un elemento OMML <m:oMath>."""
+    """Convertir una expresión LaTeX a un elemento OMML <m:oMath>.
+
+    Siempre devuelve un <m:oMath> para que el resultado se pueda insertar
+    directamente como ecuación nativa de Word (dentro de un run w:r o de un
+    <m:oMathPara>). El contenido puede ser un único elemento (fracción,
+    potencia, operador con límites, ...) o varios elementos matemáticos.
+    """
     ast = latex_a_ast(texto)
-    return _ast_a_omml(ast)
+    hijos = _ast_a_omml_lista(ast)
+    omath = etree.Element(_m("oMath"))
+    for h in hijos:
+        if h is not None:
+            omath.append(h)
+    return omath
 
 
 def latex_a_omml_parrafo(texto: str):
